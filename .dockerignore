@@ -1,0 +1,12 @@
+.git
+.gitignore
+.idea
+.vscode
+*.log
+README.md
+Jenkinsfile
+src
+target/*.jar.original
+target/classes
+target/test-classes
+target/surefire-reports
