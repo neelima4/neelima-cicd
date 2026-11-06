@@ -15,7 +15,7 @@ class HelloControllerTest {
         String result = controller.hello();
 
         assertEquals(
-            "Hello Neelima! CI/CD deployment successful!",
+            "Hello Neelima! version 2 deploy successful!",
             result
         );
     }
