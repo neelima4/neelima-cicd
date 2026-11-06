@@ -9,6 +9,6 @@ public class HelloController {
 
     @GetMapping("/hello")
     public String hello() {
-        return "Hello Neelima! CI/CD deployment successful!";
+        return "Hello Neelima! version 2 deploy successful!";
     }
 }
