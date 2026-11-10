@@ -5,11 +5,11 @@ pipeline {
     options {
         timestamps()
         skipDefaultCheckout()
+        disableConcurrentBuilds()
     }
 
     environment {
         IMAGE_NAME = 'neelima-cicd'
-        CONTAINER_NAME = 'neelima-cicd-app'
     }
 
     stages {
@@ -25,15 +25,12 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-                    echo "Running as:"
                     whoami
-
-                    echo "Workspace:"
                     pwd
-
                     java -version
                     mvn -version
                     docker version
+                    curl --version
                 '''
             }
         }
@@ -47,12 +44,7 @@ pipeline {
         stage('Package JAR') {
             steps {
                 sh 'mvn -B -DskipTests package'
-                sh 'ls -lh target/*.jar'
-            }
-        }
 
-        stage('Archive Artifact') {
-            steps {
                 archiveArtifacts(
                     artifacts: 'target/neelima-cicd-1.0.0.jar',
                     fingerprint: true
@@ -64,38 +56,40 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+
                     docker build \
                       -t "$IMAGE_NAME:$BUILD_NUMBER" .
 
-                    docker images "$IMAGE_NAME"
+                    docker image inspect \
+                      "$IMAGE_NAME:$BUILD_NUMBER" >/dev/null
+
+                    echo "Docker image built successfully"
                 '''
             }
         }
 
-        stage('Deploy Container') {
+        stage('Deploy to Dev') {
             steps {
                 sh '''
                     set -eu
 
-                    echo "Checking existing lab container"
-
                     if docker container inspect \
-                      "$CONTAINER_NAME" >/dev/null 2>&1; then
-                        docker rm -f "$CONTAINER_NAME"
+                      neelima-cicd-dev >/dev/null 2>&1; then
+                        docker rm -f neelima-cicd-dev
                     fi
 
                     docker run -d \
-                      --name "$CONTAINER_NAME" \
-                      -p 8081:8080 \
+                      --name neelima-cicd-dev \
+                      -p 127.0.0.1:8081:8080 \
+                      -e SPRING_PROFILES_ACTIVE=dev \
                       "$IMAGE_NAME:$BUILD_NUMBER"
 
-                    docker ps \
-                      --filter "name=$CONTAINER_NAME"
+                    echo "Dev container started"
                 '''
             }
         }
 
-        stage('Health Check') {
+        stage('Verify Dev') {
             steps {
                 sh '''
                     set -eu
@@ -103,22 +97,117 @@ pipeline {
                     for attempt in $(seq 1 20); do
                         if curl -fsS --max-time 3 \
                           http://127.0.0.1:8081/actuator/health; then
-
-                            echo "Application is healthy"
+                            echo "DEV HEALTHY"
                             exit 0
                         fi
 
-                        echo "Waiting for application: $attempt"
+                        echo "Waiting for Dev: $attempt"
                         sleep 3
                     done
 
-                    echo "Health check failed"
-                    docker logs --tail 100 "$CONTAINER_NAME" || true
+                    docker logs --tail 100 neelima-cicd-dev || true
                     exit 1
                 '''
             }
         }
 
+        stage('Deploy to Test') {
+            steps {
+                sh '''
+                    set -eu
+
+                    if docker container inspect \
+                      neelima-cicd-test >/dev/null 2>&1; then
+                        docker rm -f neelima-cicd-test
+                    fi
+
+                    docker run -d \
+                      --name neelima-cicd-test \
+                      -p 127.0.0.1:8082:8080 \
+                      -e SPRING_PROFILES_ACTIVE=test \
+                      "$IMAGE_NAME:$BUILD_NUMBER"
+
+                    echo "Test container started"
+                '''
+            }
+        }
+
+        stage('Verify Test') {
+            steps {
+                sh '''
+                    set -eu
+
+                    for attempt in $(seq 1 20); do
+                        if curl -fsS --max-time 3 \
+                          http://127.0.0.1:8082/actuator/health; then
+                            echo "TEST HEALTHY"
+                            exit 0
+                        fi
+
+                        echo "Waiting for Test: $attempt"
+                        sleep 3
+                    done
+
+                    docker logs --tail 100 neelima-cicd-test || true
+                    exit 1
+                '''
+            }
+        }
+
+        stage('Production Approval') {
+            steps {
+                timeout(time: 30, unit: 'MINUTES') {
+                    input(
+                        message: 'Dev and Test passed. Deploy to Production?',
+                        ok: 'Approve Production',
+                        submitter: 'YOUR_JENKINS_USERNAME'
+                    )
+                }
+            }
+        }
+
+        stage('Deploy to Production') {
+            steps {
+                sh '''
+                    set -eu
+
+                    if docker container inspect \
+                      neelima-cicd-prod >/dev/null 2>&1; then
+                        docker rm -f neelima-cicd-prod
+                    fi
+
+                    docker run -d \
+                      --name neelima-cicd-prod \
+                      -p 127.0.0.1:8083:8080 \
+                      -e SPRING_PROFILES_ACTIVE=prod \
+                      "$IMAGE_NAME:$BUILD_NUMBER"
+
+                    echo "Production container started"
+                '''
+            }
+        }
+
+        stage('Verify Production') {
+            steps {
+                sh '''
+                    set -eu
+
+                    for attempt in $(seq 1 20); do
+                        if curl -fsS --max-time 3 \
+                          http://127.0.0.1:8083/actuator/health; then
+                            echo "PRODUCTION HEALTHY"
+                            exit 0
+                        fi
+
+                        echo "Waiting for Production: $attempt"
+                        sleep 3
+                    done
+
+                    docker logs --tail 100 neelima-cicd-prod || true
+                    exit 1
+                '''
+            }
+        }
     }
 
     post {
@@ -132,19 +221,15 @@ pipeline {
         }
 
         success {
-            echo 'CI/CD DEPLOYMENT SUCCESSFUL'
+            echo 'DEV TEST PRODUCTION DEPLOYMENT SUCCESSFUL'
         }
 
         failure {
-            echo 'CI/CD PIPELINE FAILED'
+            echo 'PIPELINE FAILED - CHECK CONSOLE OUTPUT'
+        }
 
-            sh '''
-                echo "Container status:"
-                docker ps -a || true
-
-                echo "Disk usage:"
-                df -h . || true
-            '''
+        aborted {
+            echo 'PIPELINE ABORTED - NO PRODUCTION APPROVAL'
         }
     }
 }
