@@ -8,8 +8,31 @@ pipeline {
         disableConcurrentBuilds()
     }
 
+    parameters {
+        choice(
+            name: 'DEPLOY_SCOPE',
+            choices: ['DEV_ONLY', 'THROUGH_TEST', 'THROUGH_PROD'],
+            description: 'How far should the image be deployed?'
+        )
+
+        booleanParam(
+            name: 'DEPLOY_ENABLED',
+            defaultValue: true,
+            description: 'Enable Docker deployments'
+        )
+
+        string(
+            name: 'RELEASE_NOTE',
+            defaultValue: 'Session 8 deployment',
+            description: 'Non-secret release description'
+        )
+    }
+
     environment {
         IMAGE_NAME = 'neelima-cicd'
+        DEV_PORT = '8081'
+        TEST_PORT = '8082'
+        PROD_PORT = '8083'
     }
 
     stages {
@@ -21,17 +44,37 @@ pipeline {
             }
         }
 
-        stage('Environment Check') {
+        stage('Show Configuration') {
             steps {
+                echo "Deployment scope: ${params.DEPLOY_SCOPE}"
+                echo "Deployment enabled: ${params.DEPLOY_ENABLED}"
+                echo "Release note: ${params.RELEASE_NOTE}"
+
                 sh '''
-                    set -eu
-                    whoami
-                    pwd
-                    java -version
-                    mvn -version
-                    docker version
-                    curl --version
+                    echo "Image name: $IMAGE_NAME"
+                    echo "Dev port: $DEV_PORT"
+                    echo "Test port: $TEST_PORT"
+                    echo "Production port: $PROD_PORT"
                 '''
+            }
+        }
+
+        stage('Verify Credential') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'neelima-lab-token',
+                        variable: 'LAB_API_TOKEN'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+                        set -eu
+
+                        test -n "$LAB_API_TOKEN"
+                        echo "Credential binding successful"
+                    '''
+                }
             }
         }
 
@@ -63,33 +106,41 @@ pipeline {
                     docker image inspect \
                       "$IMAGE_NAME:$BUILD_NUMBER" >/dev/null
 
-                    echo "Docker image built successfully"
+                    echo "Docker image built"
                 '''
             }
         }
 
-        stage('Deploy to Dev') {
+        stage('Deploy Dev') {
+            when {
+                expression {
+                    return params.DEPLOY_ENABLED
+                }
+            }
+
             steps {
                 sh '''
                     set -eu
 
-                    if docker container inspect \
-                      neelima-cicd-dev >/dev/null 2>&1; then
-                        docker rm -f neelima-cicd-dev
-                    fi
+                    docker rm -f neelima-cicd-dev \
+                      2>/dev/null || true
 
                     docker run -d \
                       --name neelima-cicd-dev \
                       -p 127.0.0.1:8081:8080 \
                       -e SPRING_PROFILES_ACTIVE=dev \
                       "$IMAGE_NAME:$BUILD_NUMBER"
-
-                    echo "Dev container started"
                 '''
             }
         }
 
         stage('Verify Dev') {
+            when {
+                expression {
+                    return params.DEPLOY_ENABLED
+                }
+            }
+
             steps {
                 sh '''
                     set -eu
@@ -111,28 +162,44 @@ pipeline {
             }
         }
 
-        stage('Deploy to Test') {
+        stage('Deploy Test') {
+            when {
+                expression {
+                    return params.DEPLOY_ENABLED &&
+                      params.DEPLOY_SCOPE in [
+                        'THROUGH_TEST',
+                        'THROUGH_PROD'
+                      ]
+                }
+            }
+
             steps {
                 sh '''
                     set -eu
 
-                    if docker container inspect \
-                      neelima-cicd-test >/dev/null 2>&1; then
-                        docker rm -f neelima-cicd-test
-                    fi
+                    docker rm -f neelima-cicd-test \
+                      2>/dev/null || true
 
                     docker run -d \
                       --name neelima-cicd-test \
                       -p 127.0.0.1:8082:8080 \
                       -e SPRING_PROFILES_ACTIVE=test \
                       "$IMAGE_NAME:$BUILD_NUMBER"
-
-                    echo "Test container started"
                 '''
             }
         }
 
         stage('Verify Test') {
+            when {
+                expression {
+                    return params.DEPLOY_ENABLED &&
+                      params.DEPLOY_SCOPE in [
+                        'THROUGH_TEST',
+                        'THROUGH_PROD'
+                      ]
+                }
+            }
+
             steps {
                 sh '''
                     set -eu
@@ -155,6 +222,13 @@ pipeline {
         }
 
         stage('Production Approval') {
+            when {
+                expression {
+                    return params.DEPLOY_ENABLED &&
+                      params.DEPLOY_SCOPE == 'THROUGH_PROD'
+                }
+            }
+
             steps {
                 timeout(time: 30, unit: 'MINUTES') {
                     input(
@@ -166,28 +240,38 @@ pipeline {
             }
         }
 
-        stage('Deploy to Production') {
+        stage('Deploy Production') {
+            when {
+                expression {
+                    return params.DEPLOY_ENABLED &&
+                      params.DEPLOY_SCOPE == 'THROUGH_PROD'
+                }
+            }
+
             steps {
                 sh '''
                     set -eu
 
-                    if docker container inspect \
-                      neelima-cicd-prod >/dev/null 2>&1; then
-                        docker rm -f neelima-cicd-prod
-                    fi
+                    docker rm -f neelima-cicd-prod \
+                      2>/dev/null || true
 
                     docker run -d \
                       --name neelima-cicd-prod \
                       -p 127.0.0.1:8083:8080 \
                       -e SPRING_PROFILES_ACTIVE=prod \
                       "$IMAGE_NAME:$BUILD_NUMBER"
-
-                    echo "Production container started"
                 '''
             }
         }
 
         stage('Verify Production') {
+            when {
+                expression {
+                    return params.DEPLOY_ENABLED &&
+                      params.DEPLOY_SCOPE == 'THROUGH_PROD'
+                }
+            }
+
             steps {
                 sh '''
                     set -eu
@@ -217,19 +301,19 @@ pipeline {
                 allowEmptyResults: true
             )
 
-            echo 'Pipeline execution completed'
+            echo 'Pipeline completed'
         }
 
         success {
-            echo 'DEV TEST PRODUCTION DEPLOYMENT SUCCESSFUL'
+            echo 'PIPELINE SUCCESSFUL'
         }
 
         failure {
-            echo 'PIPELINE FAILED - CHECK CONSOLE OUTPUT'
+            echo 'PIPELINE FAILED - CHECK LOGS'
         }
 
         aborted {
-            echo 'PIPELINE ABORTED - NO PRODUCTION APPROVAL'
+            echo 'PIPELINE ABORTED'
         }
     }
 }
